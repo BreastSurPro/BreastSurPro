@@ -1,0 +1,156 @@
+"""
+BreastSurPro: Multimodal DeepHit Survival Prediction for Breast Cancer
+Author: [Your Name]
+Date: 2025
+Description:
+    This script implements a multimodal DeepHit model for survival prediction in breast cancer.
+    It integrates clinical, genomic, and radiomic features in a single unified architecture.
+    Dataset: TCGA-BRCA or equivalent (formatted CSV/Excel file with survival_time, survival_status columns).
+"""
+
+# ===============================
+#   Imports
+# ===============================
+import pandas as pd
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from lifelines.utils import concordance_index
+import os
+import random
+
+# ===============================
+#   Reproducibility
+# ===============================
+seed = 42
+np.random.seed(seed)
+torch.manual_seed(seed)
+random.seed(seed)
+
+# ===============================
+#   Data loading
+# ===============================
+# Replace with your dataset path
+# Example file: TCGA_BRCA_BreastSurPro.xlsx (contains all feature columns + survival_time + survival_status)
+df = pd.read_excel("BreastSurPro_data.xlsx")
+
+# Automatically detect survival columns
+df.columns = [c.strip().lower() for c in df.columns]
+if 'survival_time' not in df.columns or 'survival_status' not in df.columns:
+    raise ValueError("Dataset must include 'survival_time' and 'survival_status' columns.")
+
+# Extract features and labels
+X = df.drop(columns=['survival_time', 'survival_status'])
+y = df[['survival_time', 'survival_status']]
+
+# Split into train and test
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=seed)
+
+# Scale features
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# Convert to tensors
+X_train_tensor = torch.tensor(X_train_scaled, dtype=torch.float32)
+X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32)
+y_time_train_tensor = torch.tensor(y_train['survival_time'].values, dtype=torch.float32)
+y_event_train_tensor = torch.tensor(y_train['survival_status'].values, dtype=torch.float32)
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# ===============================
+#   Model Definition
+# ===============================
+
+T = 120  # number of discrete time bins
+input_dim = X_train.shape[1]
+
+class BreastSurProNet(nn.Module):
+    def __init__(self, input_dim, num_time_bins):
+        super(BreastSurProNet, self).__init__()
+        self.fc1 = nn.Linear(input_dim, 256)
+        self.bn1 = nn.BatchNorm1d(256)
+        self.dropout1 = nn.Dropout(p=0.4)
+        self.fc2 = nn.Linear(256, 128)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.dropout2 = nn.Dropout(p=0.3)
+        self.fc3 = nn.Linear(128, 64)
+        self.out = nn.Linear(64, num_time_bins)
+
+    def forward(self, x):
+        x = torch.relu(self.bn1(self.fc1(x)))
+        x = self.dropout1(x)
+        x = torch.relu(self.bn2(self.fc2(x)))
+        x = self.dropout2(x)
+        x = torch.relu(self.fc3(x))
+        return torch.softmax(self.out(x), dim=1)
+
+# Instantiate
+model = BreastSurProNet(input_dim, T).to(device)
+
+# ===============================
+#   DeepHit Loss Function
+# ===============================
+def deephit_loss(pred_probs, y_time, y_event, alpha=1.0, beta=1.0, sigma=10.0):
+    y_time = y_time.long()
+    y_event = y_event.float()
+    y_time_one_hot = torch.nn.functional.one_hot(y_time.clamp(max=T-1), num_classes=T).float()
+
+    # log-likelihood component
+    log_likelihood = -torch.sum(y_event * torch.log(torch.sum(pred_probs * y_time_one_hot, dim=1) + 1e-8))
+
+    # ranking component
+    risk = torch.sum(pred_probs * torch.arange(1, T + 1).float().to(device), dim=1)
+    event_mask = y_event.view(-1, 1)
+    risk_diff = risk.view(-1, 1) - risk.view(1, -1)
+    time_diff = y_time.view(-1, 1) < y_time.view(1, -1)
+    event_time_mask = event_mask * time_diff
+    ranking_loss = -torch.mean(torch.exp(-risk_diff / sigma) * event_time_mask)
+
+    # calibration component
+    calibration_loss = torch.sum((pred_probs - y_time_one_hot) ** 2)
+
+    return alpha * log_likelihood + beta * ranking_loss + calibration_loss
+
+# ===============================
+#   Training Configuration
+# ===============================
+optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
+num_epochs = 300
+model_path = "BreastSurPro_model.pt"
+
+# ===============================
+#   Training Loop
+# ===============================
+for epoch in range(num_epochs):
+    model.train()
+    optimizer.zero_grad()
+    pred_probs = model(X_train_tensor.to(device))
+    loss = deephit_loss(pred_probs, y_time_train_tensor.to(device), y_event_train_tensor.to(device))
+    loss.backward()
+    optimizer.step()
+
+    if (epoch + 1) % 10 == 0:
+        with torch.no_grad():
+            model.eval()
+            pred_probs_test = model(X_test_tensor.to(device))
+            expected_time = torch.sum(pred_probs_test * torch.arange(1, T + 1).float().to(device), dim=1)
+            ci = concordance_index(y_test['survival_time'], expected_time.cpu().numpy(), y_test['survival_status'])
+        print(f"Epoch {epoch+1}/{num_epochs}, Loss={loss.item():.4f}, C-index={ci:.3f}")
+
+torch.save(model.state_dict(), model_path)
+print(f"\n✅ Training complete. Model saved as {model_path}")
+
+# ===============================
+#   Evaluation
+# ===============================
+model.eval()
+with torch.no_grad():
+    pred_probs_test = model(X_test_tensor.to(device))
+    expected_time = torch.sum(pred_probs_test * torch.arange(1, T + 1).float().to(device), dim=1)
+    ci = concordance_index(y_test['survival_time'], expected_time.cpu().numpy(), y_test['survival_status'])
+    print(f"\nFinal Test C-index (BreastSurPro): {ci:.3f}")
