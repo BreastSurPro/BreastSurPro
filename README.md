@@ -1,16 +1,11 @@
-## Hi there 👋
-
-<!--
-**BreastSurPro/BreastSurPro** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
-
-Here are some ideas to get you started:
-
-- 🔭 I’m currently working on ...
-- 🌱 I’m currently learning ...
-- 👯 I’m looking to collaborate on ...
-- 🤔 I’m looking for help with ...
-- 💬 Ask me about ...
-- 📫 How to reach me: ...
-- 😄 Pronouns: ...
-- ⚡ Fun fact: ...
--->
+BreastSurPro: A multimodal deep survival model for breast cancer
+🧬 Model Architecture
+Input (n features)
+   ↓
+Dense (256) → BatchNorm → ReLU → Dropout(0.4)
+   ↓
+Dense (128) → BatchNorm → ReLU → Dropout(0.3)
+   ↓
+Dense (64) → ReLU
+   ↓
+Output (T time bins, softmax)
